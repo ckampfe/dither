@@ -1,11 +1,24 @@
 use image::{imageops::ColorMap, ImageBuffer, Pixel};
 
+macro_rules! some_if {
+    ($cond:expr, $some:expr) => {
+        if $cond {
+            Some($some)
+        } else {
+            None
+        }
+    };
+}
+
 pub fn dither_floyd_steinberg<Pix, Map>(image: &mut ImageBuffer<Pix, Vec<u8>>, color_map: &Map)
 where
     Map: ColorMap<Color = Pix> + ?Sized,
     Pix: Pixel<Subpixel = u8> + 'static,
 {
-    image::imageops::dither(image, color_map)
+    image::imageops::dither(image, color_map);
+
+    #[cfg(debug_assertions)]
+    assert_bilevel(image)
 }
 
 // import sys, PIL.Image
@@ -39,12 +52,12 @@ where
     let width = image.width();
     let height = image.height();
 
-    let mut mask: [[u32; 2]; 6];
+    let mut mask: [Option<[u32; 2]>; 6];
 
     let mut error: [i16; 3];
 
-    for y in 0..(height - 2) {
-        for x in 1..(width - 2) {
+    for y in 0..height {
+        for x in 0..width {
             let old_pixel = image[(x, y)];
             let new_pixel = image.get_pixel_mut(x, y);
             color_map.map_color(new_pixel);
@@ -60,27 +73,30 @@ where
             }
 
             mask = [
-                [x + 1, y],
-                [x + 2, y],
-                [x - 1, y + 1],
-                [x, y + 1],
-                [x + 1, y + 1],
-                [x, y + 2],
+                some_if!(x + 1 < width, [x + 1, y]),
+                some_if!(x + 2 < width, [x + 2, y]),
+                some_if!(x.checked_sub(1).is_some() && y + 1 < height, [x - 1, y + 1]),
+                some_if!(y + 1 < height, [x, y + 1]),
+                some_if!(x + 1 < width && y + 1 < height, [x + 1, y + 1]),
+                some_if!(y + 2 < height, [x, y + 2]),
             ];
 
-            for [x, y] in mask {
-                let pixel = image.get_pixel_mut(x, y);
+            for [x, y] in mask.iter().flatten() {
+                let pixel = image.get_pixel_mut(*x, *y);
 
                 for (e, c) in error.iter().zip(pixel.channels_mut().iter_mut()) {
                     *c = match i16::from(*c) + e {
-                        val if val < 0 => 0u8,
-                        val if val > 0xFF => 0xFFu8,
+                        val if val < 0 => 0,
+                        val if val > 255 => 255,
                         val => val as u8,
                     }
                 }
             }
         }
     }
+
+    #[cfg(debug_assertions)]
+    assert_bilevel(image)
 }
 
 ///   * 2   The Sierra-2-4A filter
@@ -93,12 +109,12 @@ where
     let width = image.width();
     let height = image.height();
 
-    let mut mask: [([u32; 2], u8); 3];
+    let mut mask: [Option<([u32; 2], u8)>; 3];
 
     let mut error: [i16; 3];
 
-    for y in 1..(height - 1) {
-        for x in 1..(width - 1) {
+    for y in 0..height {
+        for x in 0..width {
             let old_pixel = image[(x, y)];
             let new_pixel = image.get_pixel_mut(x, y);
             color_map.map_color(new_pixel);
@@ -113,21 +129,31 @@ where
                 *e = (i16::from(old) - i16::from(new)) / 4
             }
 
-            mask = [([x + 1, y], 2), ([x - 1, y - 1], 1), ([x, y + 1], 1)];
+            mask = [
+                some_if!(x + 1 < width, ([x + 1, y], 2)),
+                some_if!(
+                    x.checked_sub(1).is_some() && y + 1 < height,
+                    ([x - 1, y + 1], 1)
+                ),
+                some_if!(y + 1 < height, ([x, y + 1], 1)),
+            ];
 
-            for ([x, y], factor) in mask {
-                let pixel = image.get_pixel_mut(x, y);
+            for ([mask_x, mask_y], factor) in mask.iter().flatten() {
+                let pixel = image.get_pixel_mut(*mask_x, *mask_y);
 
                 for (e, c) in error.iter().zip(pixel.channels_mut().iter_mut()) {
-                    *c = match i16::from(*c) + e * factor as i16 {
-                        val if val < 0 => 0u8,
-                        val if val > 0xFF => 0xFFu8,
+                    *c = match i16::from(*c) + e * *factor as i16 {
+                        val if val < 0 => 0,
+                        val if val > 255 => 255,
                         val => val as u8,
                     }
                 }
             }
         }
     }
+
+    #[cfg(debug_assertions)]
+    assert_bilevel(image)
 }
 
 /// https://web.archive.org/web/20190316064436/http://www.efg2.com/Lab/Library/ImageProcessing/DHALF.TXT
@@ -150,12 +176,16 @@ where
     for (x, y, pixel) in image.enumerate_pixels_mut() {
         for channel in pixel.channels_mut() {
             let scaled = *channel >> 2;
-            assert!(scaled < 64);
             if scaled > pattern[x as usize & 7][y as usize & 7] {
                 *channel = 255;
+            } else {
+                *channel = 0;
             }
         }
     }
+
+    #[cfg(debug_assertions)]
+    assert_bilevel(image)
 }
 
 //     grayscaleImage.mapSelf(brightness =>
@@ -170,21 +200,34 @@ where
     Pix: Pixel<Subpixel = u8> + 'static,
 {
     for pixel in image.pixels_mut() {
-        let r: i8 = rand::random();
+        let r: u8 = rand::random();
         for channel in pixel.channels_mut() {
-            *channel = if i16::from(*channel) + i16::from(r - 127i8) > 127 {
+            *channel = if i16::from(*channel) + (r as i16 - 127i16) > 127 {
                 255
             } else {
                 0
             };
         }
     }
+
+    #[cfg(debug_assertions)]
+    assert_bilevel(image)
 }
 
-// #[cfg(test)]
-// mod tests {
-//     #[test]
-//     fn it_works() {
-//         assert_eq!(2 + 2, 4);
-//     }
-// }
+#[cfg(debug_assertions)]
+fn assert_bilevel<Pix>(image: &mut ImageBuffer<Pix, Vec<u8>>)
+where
+    Pix: Pixel<Subpixel = u8> + 'static,
+{
+    for (x, y, pixel) in image.enumerate_pixels() {
+        for channel in pixel.channels() {
+            debug_assert!(
+                *channel == 0 || *channel == 255,
+                "x={}, y={}, channel={}",
+                x,
+                y,
+                channel
+            )
+        }
+    }
+}
